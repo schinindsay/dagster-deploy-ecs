@@ -1,0 +1,11 @@
+Creates:
+- dagster-ecs-sg
+- ecr repositories:
+    - webserver
+    - daemon
+    - user_code
+- IAM:
+    - task roles for all 3 services 
+    - task execution roles for all 3 services
+- cloudwatch.tf
+    - Creates a cloudwatch group for dagster

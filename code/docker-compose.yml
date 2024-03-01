@@ -1,0 +1,233 @@
+version: "3.8"
+
+services:
+  # This service runs the postgres DB used by dagster for run storage, schedule storage,
+  # and event log storage.
+
+  postgresql:
+    image: postgres:11
+    container_name: postgresql
+    environment:
+      POSTGRES_HOSTNAME: ${DAGSTER_POSTGRES_HOSTNAMENAME}
+      POSTGRES_USER: ${DAGSTER_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${DAGSTER_POSTGRES_DB}
+    networks:
+      - network
+
+  # This service runs the gRPC server that loads your user code, in both dagit
+  # and dagster-daemon. By setting DAGSTER_CURRENT_IMAGE to its own image, we tell the
+  # run launcher to use this same image when launching runs in a new container as well.
+  # Multiple containers like this can be deployed separately - each just needs to run on
+  # its own port, and have its own entry in the workspace.yaml file that's loaded by dagit.
+  user_code:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: user_code
+    image: "user_code"
+    container_name: user_code
+    command: "dagster api grpc -h 0.0.0.0 -p 4000 -f defs.py"
+    restart: always
+    environment:
+      DAGSTER_POSTGRES_HOSTNAME: ${DAGSTER_POSTGRES_HOSTNAME}
+      DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER}
+      DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD}
+      DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB}
+      DAGSTER_POSTGRES_PORT: ${DAGSTER_POSTGRES_PORT}
+      DAGSTER_CURRENT_IMAGE: ${DAGSTER_CURRENT_IMAGE}
+      CODE_FOLDER: ${CODE_FOLDER}
+      REPO_LOCATION: ${REPO_LOCATION}
+    networks:
+      - network
+
+  # This service runs dagit, which loads your user code from the user code container.
+  # Since our instance uses the QueuedRunCoordinator, any runs submitted from dagit will be put on
+  # a queue and later dequeued and launched by dagster-daemon.
+  webserver:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: webserver
+    image: "webserver"
+    entrypoint:
+      - dagster-webserver
+      - -h
+      - "0.0.0.0"
+      - -p
+      - "3000"
+      - -w
+      - workspace.yaml
+    container_name: webserver
+    expose:
+      - "3000"
+    ports:
+      - "3000:3000"
+    environment:
+      DAGSTER_POSTGRES_HOSTNAME: ${DAGSTER_POSTGRES_HOSTNAME}
+      DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER}
+      DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD}
+      DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB}
+      DAGSTER_POSTGRES_PORT: ${DAGSTER_POSTGRES_PORT}
+    volumes: # Make docker client accessible so we can terminate containers from dagit
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/io_manager_storage:/tmp/io_manager_storage
+    networks:
+      - network
+    depends_on:
+      - postgresql
+      - user_code
+
+  # This service runs the dagster-daemon process, which is responsible for taking runs
+  # off of the queue and launching them, as well as creating runs from schedules or sensors.
+  daemon:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+      target: dagster
+    image: "daemon" 
+    container_name: daemon
+    restart: on-failure
+    entrypoint:
+      - dagster-daemon
+      - run
+    environment:
+      DAGSTER_POSTGRES_HOSTNAME: postgresql
+      DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER}
+      DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD}
+      DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB}
+      DAGSTER_POSTGRES_PORT: ${DAGSTER_POSTGRES_PORT}
+    volumes: # Make docker client accessible so we can launch containers using host docker
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/io_manager_storage:/tmp/io_manager_storage
+    networks:
+      - network
+    depends_on:
+      - postgresql
+      - user_code
+
+networks:
+  network:
+    driver: bridge
+    name: network
+
+
+
+#   webserver:
+#     platform: linux/amd64
+#     build:
+#       context: .
+#       dockerfile: ./Dockerfile
+#       target: webserver
+#     # image: "$REGISTRY_URL/webserver"
+#     image: "webserver"
+#     container_name: webserver
+#     command: "dagster-webserver -h 0.0.0.0 -p 3000 -w workspace.yaml"
+#     ports:
+#       - "3000:3000"
+#     environment:
+#       DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB}
+#       DAGSTER_POSTGRES_HOSTNAMENAME: ${DAGSTER_POSTGRES_HOSTNAMENAME}
+#       DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD}
+#       DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER}
+#     depends_on:
+#       - postgresql
+#       - user_code
+#     x-aws-role:
+#       Statement:
+#         - Effect: "Allow"
+#           Action:
+#             - "ecs:DescribeTasks"
+#             - "ecs:StopTask"
+#           Resource:
+#             - "*"
+#         - Effect: "Allow"
+#           Action:
+#             - "iam:PassRole"
+#           Resource:
+#             - "*"
+#           Condition:
+#             StringLike:
+#               iam:PassedToService: "ecs-tasks.amazonaws.com"
+
+#   # This service runs the dagster-daemon process, which is responsible for
+#   # taking runs off of the queue and launching them, as well as creating
+#   # runs from schedules or sensors.
+#   daemon:
+#     platform: linux/amd64
+#     build:
+#       context: .
+#       dockerfile: ./Dockerfile
+#       target: dagster
+#     # image: "$REGISTRY_URL/daemon"
+#     image: "daemon"
+#     container_name: daemon
+#     command: "dagster-daemon run"
+#     environment:
+#       DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB}
+#       DAGSTER_POSTGRES_HOSTNAMENAME: ${DAGSTER_POSTGRES_HOSTNAMENAME}
+#       DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD}
+#       DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER}
+#     depends_on:
+#       - postgresql
+#       - user_code
+#     x-aws-role:
+#       Statement:
+#         - Effect: "Allow"
+#           Action:
+#             - "ec2:DescribeNetworkInterfaces"
+#             - "ecs:DescribeTaskDefinition"
+#             - "ecs:DescribeTasks"
+#             - "ecs:ListAccountSettings"
+#             - "ecs:RegisterTaskDefinition"
+#             - "ecs:RunTask"
+#             - "ecs:TagResource"
+#             - "secretsmanager:DescribeSecret"
+#             - "secretsmanager:ListSecrets"
+#             - "secretsmanager:GetSecretValue"
+#           Resource:
+#             - "*"
+#         - Effect: "Allow"
+#           Action:
+#             - "iam:PassRole"
+#           Resource:
+#             - "*"
+#           Condition:
+#             StringLike:
+#               iam:PassedToService: "ecs-tasks.amazonaws.com"
+
+#   # This service runs a gRPC server that serves information about your
+#   # definitions. By setting DAGSTER_CURRENT_IMAGE to its own image, we tell the
+#   # run launcher to use this same image when launching runs in a new container.
+#   # Multiple containers like this can be deployed separately - each needs to
+#   # run on its own port and have its own entry in the workspace.yaml file.
+#   user_code:
+#     platform: linux/amd64
+#     build:
+#       context: .
+#       dockerfile: ./Dockerfile
+#       target: user_code
+#     # image: "$REGISTRY_URL/user_code"
+#     image: "user_code"
+#     container_name: user_code
+#     command: "dagster api grpc -h 0.0.0.0 -p 4000 -f defs.py"
+#     environment:
+#       DAGSTER_POSTGRES_DB: ${DAGSTER_POSTGRES_DB}
+#       DAGSTER_POSTGRES_HOSTNAMENAME: ${DAGSTER_POSTGRES_HOSTNAMENAME}
+#       DAGSTER_POSTGRES_PASSWORD: ${DAGSTER_POSTGRES_PASSWORD}
+#       DAGSTER_POSTGRES_USER: ${DAGSTER_POSTGRES_USER}
+#       DAGSTER_CURRENT_IMAGE: ${DAGSTER_CURRENT_IMAGE}
+
+#   # This service runs the postgres DB used by dagster for run storage, schedule
+#   # storage, and event log storage. In a real deployment, you might choose to
+#   # remove this in favor of an RDS instance.
+#   postgresql:
+#     image: postgres:11
+#     container_name: postgresql
+#     environment:
+#       POSTGRES_DB: "postgres_db"
+#       POSTGRES_PASSWORD: "postgres_password"
+#       POSTGRES_USER: "postgres_user"
